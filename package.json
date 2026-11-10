@@ -10,11 +10,11 @@
     "build": "npm --prefix frontend run build",
     "tauri:dev": "npm --prefix frontend exec -- tauri dev",
     "tauri:build": "npm --prefix frontend exec -- tauri build",
-    "tauri:build:win-x64": "npm --prefix frontend exec -- tauri build -- --target x86_64-pc-windows-msvc",
-    "tauri:build:win-arm64": "npm --prefix frontend exec -- tauri build -- --target aarch64-pc-windows-msvc",
-    "tauri:build:mac-x64": "npm --prefix frontend exec -- tauri build -- --target x86_64-apple-darwin",
-    "tauri:build:mac-arm64": "npm --prefix frontend exec -- tauri build -- --target aarch64-apple-darwin",
-    "tauri:build:mac-universal": "npm --prefix frontend exec -- tauri build -- --target universal-apple-darwin"
+    "tauri:build:win-x64": "npm --prefix frontend exec -- tauri build --target x86_64-pc-windows-msvc",
+    "tauri:build:win-arm64": "npm --prefix frontend exec -- tauri build --target aarch64-pc-windows-msvc",
+    "tauri:build:mac-x64": "npm --prefix frontend exec -- tauri build --target x86_64-apple-darwin",
+    "tauri:build:mac-arm64": "npm --prefix frontend exec -- tauri build --target aarch64-apple-darwin",
+    "tauri:build:mac-universal": "npm --prefix frontend exec -- tauri build --target universal-apple-darwin"
   },
   "keywords": [
     "quark",

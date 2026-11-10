@@ -10,7 +10,19 @@
         "frontendDist": "../frontend/dist"
     },
     "app": {
-        "windows": [],
+        "windows": [
+            {
+                "label": "main",
+                "title": "Quark Downloader Pro",
+                "width": 1024,
+                "height": 750,
+                "minWidth": 1024,
+                "minHeight": 700,
+                "resizable": true,
+                "decorations": false,
+                "center": true
+            }
+        ],
         "security": {
             "csp": null
         }

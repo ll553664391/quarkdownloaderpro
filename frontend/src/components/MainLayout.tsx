@@ -1,4 +1,5 @@
-import React, { type ReactNode, useMemo } from 'react';
+import React, { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { Sidebar } from '../components/Sidebar';
 import { TitleBar } from '../components/TitleBar';
 import { useQuarkStore } from '../store/useQuarkStore';
@@ -7,6 +8,17 @@ import { AuthModal } from '../features/auth/AuthModal';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Zap, CheckCircle2, AlertCircle, Info, AlertTriangle } from 'lucide-react';
 import { cn, formatSize, getErrorMessage } from '../utils';
+
+/** 秒数 → mm:ss / h:mm:ss */
+const fmtDuration = (s: number): string => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return h > 0
+        ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+        : `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+};
+
 const ToastIcon: React.FC<{ type: string }> = ({ type }) => {
     switch (type) {
         case 'success': return <CheckCircle2 size={18} className="text-emerald-400" />;
@@ -41,6 +53,8 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
         setCapacityLoading,
         activeDownloads,
         progress,
+        downloading,
+        taskStartedAt,
         toast,
         notify,
         setLoggingOut,
@@ -71,6 +85,48 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
 
     const hasDownloadProgress = dlEntries.length > 0;
     const hasTaskProgress = progress.total > 0 && !hasDownloadProgress;
+
+    // ── 任务总览：整体字节进度 / 总速度 / 已用与剩余时间 ──
+    const overall = useMemo(() => {
+        let downloaded = 0, total = 0, speed = 0;
+        for (const dl of dlEntries) {
+            downloaded += dl.downloaded;
+            total += dl.total;
+            speed += dl.speed;
+        }
+        return { downloaded, total, speed };
+    }, [dlEntries]);
+
+    const overallPercent = overall.total > 0
+        ? Math.round((overall.downloaded / overall.total) * 100)
+        : 0;
+
+    // 每秒跳动一次时钟，驱动"已用时间"显示
+    const [now, setNow] = useState(Date.now());
+    useEffect(() => {
+        if (!taskStartedAt) return;
+        const timer = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(timer);
+    }, [taskStartedAt]);
+
+    const elapsedSec = taskStartedAt
+        ? Math.max(0, Math.floor((now - taskStartedAt) / 1000))
+        : 0;
+    const remainingSec = overall.speed > 0 && overall.total > overall.downloaded
+        ? Math.round((overall.total - overall.downloaded) / overall.speed)
+        : null;
+
+    // ── 任务栏进度条同步（迅雷式覆盖层） ──
+    useEffect(() => {
+        let pct: number | null = null;
+        if (hasDownloadProgress && overall.total > 0) {
+            pct = overallPercent;
+        } else if (downloading && progress.total > 0) {
+            // 转存等无字节进度阶段，按文件数折算
+            pct = Math.round((progress.done / progress.total) * 100);
+        }
+        invoke('set_taskbar_progress', { percent: pct }).catch(() => {});
+    }, [hasDownloadProgress, overallPercent, downloading, progress.done, progress.total]);
 
     const fetchCapacity = async () => {
         if (!isLoggedIn) return;
@@ -130,7 +186,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
     const hasIslandContent = hasProgress || hasToast;
 
     return (
-        <div className="h-screen flex flex-col bg-[#f1f5f9] text-slate-900 font-sans selection:bg-indigo-100 selection:text-indigo-900 overflow-hidden relative">
+        <div className="h-screen flex flex-col bg-[#f1f5f9] text-slate-900 dark:bg-[#0b1220] dark:text-slate-100 font-sans selection:bg-indigo-100 selection:text-indigo-900 dark:selection:bg-indigo-900/60 dark:selection:text-indigo-100 overflow-hidden relative">
             {/* 自定义标题栏 */}
             <TitleBar />
 
@@ -151,6 +207,30 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
                             )}
                             style={{ fontFamily: '"Source Han Sans SC", "Noto Sans SC", "Microsoft YaHei", sans-serif' }}
                         >
+                            {/* 任务总览：整体进度 / 总速度 / 已用与剩余时间 */}
+                            {hasProgress && taskStartedAt > 0 && (
+                                <div className="mb-3 pb-2.5 border-b border-white/10 flex items-center justify-between text-[11px]">
+                                    <div className="flex items-center gap-3">
+                                        {hasDownloadProgress && overall.total > 0 ? (
+                                            <>
+                                                <span className="text-white font-semibold tabular-nums">整体 {overallPercent}%</span>
+                                                {overall.speed > 0 && (
+                                                    <span className="text-emerald-300 tabular-nums">{(overall.speed / 1024 / 1024).toFixed(1)} MB/s</span>
+                                                )}
+                                            </>
+                                        ) : (
+                                            <span className="text-white font-semibold tabular-nums">
+                                                {progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0}%
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-3 text-slate-400 tabular-nums">
+                                        <span>已用 {fmtDuration(elapsedSec)}</span>
+                                        {remainingSec !== null && <span>剩余 {fmtDuration(remainingSec)}</span>}
+                                    </div>
+                                </div>
+                            )}
+
                             {hasDownloadProgress && (
                                 <div className="flex items-start gap-4">
                                     <div className="w-10 h-10 rounded-2xl bg-indigo-500 flex items-center justify-center text-white shrink-0 shadow-lg shadow-indigo-500/20">
@@ -240,10 +320,10 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
 
             {/* 背景氛围光晕 - 让玻化效果可见 */}
             <div className="fixed inset-0 overflow-hidden pointer-events-none">
-                <div className="absolute -top-[10%] -left-[10%] w-[40%] h-[40%] rounded-full bg-indigo-200/40 blur-[120px]" />
-                <div className="absolute top-[20%] -right-[5%] w-[30%] h-[40%] rounded-full bg-purple-200/30 blur-[100px]" />
-                <div className="absolute -bottom-[10%] left-[20%] w-[50%] h-[30%] rounded-full bg-pink-100/40 blur-[110px]" />
-                <div className="absolute top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[60%] h-[60%] rounded-full bg-slate-200/20 blur-[140px]" />
+                <div className="absolute -top-[10%] -left-[10%] w-[40%] h-[40%] rounded-full bg-indigo-200/40 dark:bg-indigo-600/15 blur-[120px]" />
+                <div className="absolute top-[20%] -right-[5%] w-[30%] h-[40%] rounded-full bg-purple-200/30 dark:bg-purple-700/10 blur-[100px]" />
+                <div className="absolute -bottom-[10%] left-[20%] w-[50%] h-[30%] rounded-full bg-pink-100/40 dark:bg-pink-700/10 blur-[110px]" />
+                <div className="absolute top-[50%] left-[50%] -translate-x-1/2 -translate-y-1/2 w-[60%] h-[60%] rounded-full bg-slate-200/20 dark:bg-slate-700/10 blur-[140px]" />
             </div>
 
             <Sidebar

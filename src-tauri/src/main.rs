@@ -6,9 +6,10 @@ mod quark_client;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tokio::io::AsyncWriteExt;
+use tokio::task::JoinHandle;
 
 /// 全局下载代际计数器（epoch）。
 /// 每次取消时 +1，下载任务持有启动时的 epoch，
@@ -19,6 +20,29 @@ static DOWNLOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
 fn is_cancelled(epoch: u64) -> bool {
     DOWNLOAD_EPOCH.load(Ordering::Relaxed) != epoch
 }
+
+/// 取消轮询 future：每 200ms 检查一次 epoch，被取消时返回。
+/// 与网络读取用 tokio::select! 赛跑，保证即使连接长时间无数据也能及时响应取消。
+async fn cancellation_poll(epoch: u64) {
+    loop {
+        if is_cancelled(epoch) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// 活跃下载任务注册表：cancel_downloads 可立即 abort 任务，无论其卡在
+/// 连接建立、数据传输还是分片合并等任何环节（epoch 机制覆盖不到的死角）。
+struct ActiveDownload {
+    id: String,
+    handle: JoinHandle<()>,
+    save_path: PathBuf,
+    /// 临时分片目录，由 download_multithread 创建后写入
+    temp_dir: Arc<Mutex<Option<PathBuf>>>,
+}
+
+static ACTIVE_DOWNLOADS: Mutex<Vec<ActiveDownload>> = Mutex::new(Vec::new());
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch";
 const MIN_MULTITHREAD_SIZE: u64 = 10 * 1024 * 1024; // 10MB 以下走单线程
@@ -86,6 +110,76 @@ async fn follow_redirects(
     }
 }
 
+/// 清洗相对路径：过滤空片段、`.`、`..`（防目录越权）及 Windows 非法字符
+fn sanitize_relative_path(p: &str) -> PathBuf {
+    let mut pb = PathBuf::new();
+    for comp in p.split(['/', '\\']) {
+        let comp = comp.trim();
+        if comp.is_empty() || comp == "." || comp == ".." {
+            continue;
+        }
+        let cleaned: String = comp
+            .chars()
+            .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+            .collect();
+        if !cleaned.is_empty() {
+            pb.push(cleaned);
+        }
+    }
+    if pb.as_os_str().is_empty() {
+        PathBuf::from("download")
+    } else {
+        pb
+    }
+}
+
+/// 计算目标保存路径：基础目录（save_dir 优先，否则系统下载目录）+ 相对路径/文件名。
+/// 下载与"已存在跳过"检查共用，保证判断路径与实际保存路径一致。
+fn resolve_target_path(
+    save_dir: &Option<String>,
+    relative_path: &Option<String>,
+    filename: &str,
+) -> PathBuf {
+    let base_dir = match save_dir {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d.trim()),
+        _ => dirs::download_dir().unwrap_or_else(|| PathBuf::from(".")),
+    };
+    match relative_path.as_deref() {
+        Some(r) if !r.trim().is_empty() => base_dir.join(sanitize_relative_path(r)),
+        _ => base_dir.join(filename),
+    }
+}
+
+/// 文件级断点续传：判断目标文件是否已存在。
+/// 停止任务时会保留完整文件、清理半截文件，因此"存在 = 上次已完整下载"。
+#[tauri::command]
+fn check_file_exists(
+    save_dir: Option<String>,
+    relative_path: Option<String>,
+    filename: String,
+) -> Result<bool, String> {
+    let full_path = resolve_target_path(&save_dir, &relative_path, &filename);
+    Ok(full_path.is_file())
+}
+
+/// 设置 Windows 任务栏按钮的进度覆盖层（类似迅雷）。
+/// percent: Some(0-100) 显示进度条；None 清除。任务栏无法绘制文字，百分比在主界面悬浮岛展示。
+#[tauri::command]
+fn set_taskbar_progress(app: tauri::AppHandle, percent: Option<u64>) -> Result<(), String> {
+    let win = app.get_webview_window("main").ok_or("主窗口不存在")?;
+    let state = match percent {
+        Some(p) => tauri::window::ProgressBarState {
+            status: Some(tauri::window::ProgressBarStatus::Normal),
+            progress: Some(p.clamp(0, 100)),
+        },
+        None => tauri::window::ProgressBarState {
+            status: Some(tauri::window::ProgressBarStatus::None),
+            progress: None,
+        },
+    };
+    win.set_progress_bar(state).map_err(|e| e.to_string())
+}
+
 /// 解决文件名冲突：存在同名文件时追加 (1), (2), ...
 fn resolve_save_path(downloads_dir: &PathBuf, filename: &str) -> PathBuf {
     let mut save_path = downloads_dir.join(filename);
@@ -119,12 +213,81 @@ fn resolve_save_path(downloads_dir: &PathBuf, filename: &str) -> PathBuf {
 
 // ── Tauri 命令入口 ───────────────────────────────────────
 
-/// 取消所有正在进行的下载（epoch +1 → 旧任务自动失效）
+/// 取消所有正在进行的下载：epoch +1 使旧任务失效，并立即 abort
+/// 注册表内全部活跃任务（含卡在连接建立等 epoch 检查不到的环节）
 #[tauri::command]
 async fn cancel_downloads() -> Result<serde_json::Value, String> {
     let old = DOWNLOAD_EPOCH.fetch_add(1, Ordering::SeqCst);
     println!("[download] 取消下载 (epoch {} → {})", old, old + 1);
+
+    let mut cleanup: Vec<(Option<PathBuf>, PathBuf)> = Vec::new();
+    {
+        let mut tasks = ACTIVE_DOWNLOADS.lock().unwrap();
+        for t in tasks.drain(..) {
+            t.handle.abort();
+            let temp = t.temp_dir.lock().unwrap().take();
+            cleanup.push((temp, t.save_path));
+        }
+    }
+
+    // 后台清理临时分片目录与未完成的目标文件（注册表内任务必定未完成）
+    tokio::spawn(async move {
+        for (temp, save) in cleanup {
+            if let Some(dir) = temp {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                println!("[download] 已清理临时目录: {:?}", dir);
+            }
+            let _ = tokio::fs::remove_file(&save).await;
+        }
+    });
+
     Ok(serde_json::json!({ "cancelled": true }))
+}
+
+/// 弹出原生文件夹选择对话框，返回所选目录路径（取消则返回 None）
+#[tauri::command]
+async fn pick_download_dir() -> Result<Option<String>, String> {
+    let folder = rfd::AsyncFileDialog::new()
+        .set_title("选择下载目录")
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_string_lossy().to_string());
+    Ok(folder)
+}
+
+/// 在系统文件管理器中打开文件夹（传入文件路径时打开其所在目录）
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let target = if p.is_file() {
+        p.parent().unwrap_or(p).to_path_buf()
+    } else {
+        p.to_path_buf()
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败: {}", e))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败: {}", e))?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -134,10 +297,29 @@ async fn download_file(
     cookie: String,
     filename: String,
     thread_count: Option<usize>,
+    save_dir: Option<String>,
+    relative_path: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let thread_count = thread_count.unwrap_or(999).max(1).min(999);
-    let downloads_dir = dirs::download_dir().unwrap_or_else(|| PathBuf::from("."));
-    let save_path = resolve_save_path(&downloads_dir, &filename);
+
+    // 目标路径：下载目录 + 相对路径（保留分享子目录结构），无相对路径时平铺
+    let full_path = resolve_target_path(&save_dir, &relative_path, &filename);
+
+    let target_dir = full_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    tokio::fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|e| format!("创建下载目录失败: {}", e))?;
+
+    let filename = full_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| filename);
+
+    let save_path = resolve_save_path(&target_dir, &filename);
     let save_path_display = save_path.to_string_lossy().to_string();
 
     // 捕获当前 epoch——本次下载的"身份证"
@@ -147,9 +329,22 @@ async fn download_file(
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<serde_json::Value, String>>();
 
-    tokio::spawn(async move {
-        let result = do_download(app, url, cookie, filename, save_path, epoch, download_id, thread_count).await;
+    // 注册到活跃任务表，cancel_downloads 可立即 abort（覆盖任何挂起环节）
+    let temp_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+    let wrapper_id = download_id.clone();
+    let reg_id = download_id.clone();
+    let reg_temp_slot = temp_slot.clone();
+    let handle = tokio::spawn(async move {
+        let result = do_download(app, url, cookie, filename, save_path, epoch, download_id, thread_count, temp_slot).await;
+        // 任务结束（含取消路径）时注销自己
+        ACTIVE_DOWNLOADS.lock().unwrap().retain(|t| t.id != wrapper_id);
         let _ = tx.send(result);
+    });
+    ACTIVE_DOWNLOADS.lock().unwrap().push(ActiveDownload {
+        id: reg_id,
+        handle,
+        save_path: save_path_display.clone().into(),
+        temp_dir: reg_temp_slot,
     });
 
     match rx.await {
@@ -169,6 +364,7 @@ async fn do_download(
     epoch: u64,
     download_id: String,
     thread_count: usize,
+    temp_slot: Arc<Mutex<Option<PathBuf>>>,
 ) -> Result<serde_json::Value, String> {
     if is_cancelled(epoch) {
         return Err("下载已取消".into());
@@ -217,7 +413,7 @@ async fn do_download(
     if accept_ranges && total_size >= MIN_MULTITHREAD_SIZE {
         drop(resp);
         println!("[download] 启用 {} 线程并行下载", thread_count);
-        download_multithread(app, client, final_url, cookie, filename, save_path, total_size, epoch, download_id, thread_count)
+        download_multithread(app, client, final_url, cookie, filename, save_path, total_size, epoch, download_id, thread_count, temp_slot)
             .await
     } else {
         println!("[download] 使用单线程下载 (Range 不支持或文件较小)");
@@ -238,6 +434,7 @@ async fn download_multithread(
     epoch: u64,
     download_id: String,
     thread_count: usize,
+    temp_slot: Arc<Mutex<Option<PathBuf>>>,
 ) -> Result<serde_json::Value, String> {
     // 1. 为本次下载创建独立临时目录
     let temp_id = uuid::Uuid::new_v4();
@@ -248,6 +445,8 @@ async fn download_multithread(
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| format!("创建临时目录失败: {}", e))?;
+    // 通知注册表：cancel 时需清理该临时目录
+    *temp_slot.lock().unwrap() = Some(temp_dir.clone());
 
     // 2. 计算各段字节范围
     let segment_size = total_size / thread_count as u64;
@@ -430,11 +629,13 @@ async fn download_segment(
 ) -> Result<(), String> {
     let range_header = format!("bytes={}-{}", start, end);
 
-    let resp = add_headers(client.get(url), cookie)
-        .header("Range", &range_header)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败: {}", e))?;
+    // 请求发起阶段也与取消轮询赛跑：CDN 限流时连接可能长时间无响应
+    let resp = tokio::select! {
+        r = add_headers(client.get(url), cookie)
+            .header("Range", &range_header)
+            .send() => r.map_err(|e| format!("请求失败: {}", e))?,
+        _ = cancellation_poll(epoch) => return Err("下载已取消".into()),
+    };
 
     let status = resp.status().as_u16();
     if status != 206 && status != 200 {
@@ -455,26 +656,26 @@ async fn download_segment(
     let expected = end - start + 1;
 
     loop {
-        if is_cancelled(epoch) {
-            return Err("下载已取消".into());
-        }
-        match resp.chunk().await {
-            Ok(Some(chunk)) => {
-                writer
-                    .write_all(&chunk)
-                    .await
-                    .map_err(|e| format!("写入失败: {}", e))?;
-                seg_downloaded += chunk.len() as u64;
-                progress.store(seg_downloaded, Ordering::Relaxed);
-            }
-            Ok(None) => break,
-            Err(e) => {
-                return Err(format!(
-                    "传输中断: {} (已下载 {}/{})",
-                    e, seg_downloaded, expected
-                ));
-            }
-        }
+        // 网络数据与取消轮询赛跑：即使 chunk 长时间 pending 也能在 200ms 内响应取消
+        let chunk = tokio::select! {
+            c = resp.chunk() => match c {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(format!(
+                        "传输中断: {} (已下载 {}/{})",
+                        e, seg_downloaded, expected
+                    ));
+                }
+            },
+            _ = cancellation_poll(epoch) => return Err("下载已取消".into()),
+        };
+        writer
+            .write_all(&chunk)
+            .await
+            .map_err(|e| format!("写入失败: {}", e))?;
+        seg_downloaded += chunk.len() as u64;
+        progress.store(seg_downloaded, Ordering::Relaxed);
     }
 
     writer
@@ -511,46 +712,48 @@ async fn download_single(
     let mut last_downloaded: u64 = 0;
 
     loop {
-        if is_cancelled(epoch) {
-            drop(writer);
-            let _ = tokio::fs::remove_file(&save_path).await;
-            return Err("下载已取消".into());
-        }
-        match resp.chunk().await {
-            Ok(Some(chunk)) => {
-                writer
-                    .write_all(&chunk)
-                    .await
-                    .map_err(|e| format!("写入失败: {}", e))?;
-                downloaded += chunk.len() as u64;
-
-                if last_emit.elapsed() >= std::time::Duration::from_millis(500) {
-                    let now = std::time::Instant::now();
-                    let dt = now.duration_since(last_emit).as_secs_f64();
-                    let speed = if dt > 0.0 {
-                        (downloaded.saturating_sub(last_downloaded)) as f64 / dt
-                    } else {
-                        0.0
-                    };
-                    last_downloaded = downloaded;
-                    let _ = app.emit(
-                        "download-progress",
-                        serde_json::json!({
-                            "id": &download_id,
-                            "filename": &filename,
-                            "downloaded": downloaded,
-                            "total": total_size,
-                            "speed": speed,
-                        }),
-                    );
-                    last_emit = now;
+        // 网络数据与取消轮询赛跑：即使 chunk 长时间 pending 也能在 200ms 内响应取消
+        let chunk = tokio::select! {
+            c = resp.chunk() => match c {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&save_path).await;
+                    return Err(format!("下载中断: {} (已下载 {})", e, downloaded));
                 }
-            }
-            Ok(None) => break,
-            Err(e) => {
+            },
+            _ = cancellation_poll(epoch) => {
+                drop(writer);
                 let _ = tokio::fs::remove_file(&save_path).await;
-                return Err(format!("下载中断: {} (已下载 {})", e, downloaded));
+                return Err("下载已取消".into());
             }
+        };
+        writer
+            .write_all(&chunk)
+            .await
+            .map_err(|e| format!("写入失败: {}", e))?;
+        downloaded += chunk.len() as u64;
+
+        if last_emit.elapsed() >= std::time::Duration::from_millis(500) {
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last_emit).as_secs_f64();
+            let speed = if dt > 0.0 {
+                (downloaded.saturating_sub(last_downloaded)) as f64 / dt
+            } else {
+                0.0
+            };
+            last_downloaded = downloaded;
+            let _ = app.emit(
+                "download-progress",
+                serde_json::json!({
+                    "id": &download_id,
+                    "filename": &filename,
+                    "downloaded": downloaded,
+                    "total": total_size,
+                    "speed": speed,
+                }),
+            );
+            last_emit = now;
         }
     }
 
@@ -589,40 +792,24 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init())
-        .invoke_handler(tauri::generate_handler![download_file, cancel_downloads])
+        .invoke_handler(tauri::generate_handler![
+            download_file,
+            cancel_downloads,
+            pick_download_dir,
+            open_folder,
+            check_file_exists,
+            set_taskbar_progress
+        ])
         .setup(|app| {
-            // 手动创建主窗口（而非 tauri.conf.json 自动创建），
-            // 这样才能在 Builder 上注册 on_navigation 回调
-            let _main_window = tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::App("index.html".into()),
-            )
-            .title("Quark Downloader Pro")
-            .inner_size(1024.0, 750.0)
-            .min_inner_size(1024.0, 700.0)
-            .resizable(true)
-            .decorations(false)
-            .shadow(true)
-            .center()
-            .on_navigation(|_url| {
-                let old = DOWNLOAD_EPOCH.fetch_add(1, Ordering::SeqCst);
-                println!(
-                    "[download] 检测到页面导航/刷新，取消下载 (epoch {} → {})",
-                    old,
-                    old + 1
-                );
-                true // 允许导航继续
-            })
-            .build()
-            .expect("创建主窗口失败");
+            let _main_window = app
+                .get_webview_window("main")
+                .expect("主窗口不存在");
 
             // 启动内嵌 HTTP 服务（axum）
             let port: u16 = std::env::var("PORT")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3000);
-
             tauri::async_runtime::spawn(async move {
                 let router = api_server::create_router();
                 let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))

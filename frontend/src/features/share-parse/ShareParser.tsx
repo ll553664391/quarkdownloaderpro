@@ -97,7 +97,7 @@ export const ShareParser: React.FC = () => {
                 depth,
                 path,
                 children: [],
-                expanded: depth === 0,
+                expanded: false,
             };
 
             if (isDir) {
@@ -213,7 +213,7 @@ export const ShareParser: React.FC = () => {
             <div className="relative group">
                 <GradientGlow />
                 <SearchContainer className="relative pr-2">
-                    <div className="flex items-center pl-4 text-slate-400 group-focus-within:text-indigo-500 transition-colors">
+                    <div className="flex items-center pl-4 text-slate-400 dark:text-slate-500 group-focus-within:text-indigo-500 transition-colors">
                         <Link2 size={20} />
                     </div>
                     <Input
@@ -282,7 +282,7 @@ export const ShareParser: React.FC = () => {
                                         onClick={() => setIsActionBarVisible(!isActionBarVisible)}
                                         className={cn(
                                             "relative z-10 w-12 h-12 flex items-center justify-center rounded-xl shadow-sm transition-all duration-500",
-                                            isPanelOpen ? "shadow-indigo-200 shadow-lg" : "hover:bg-indigo-200/50"
+                                            isPanelOpen ? "shadow-indigo-200 dark:shadow-indigo-900/50 shadow-lg" : "hover:bg-indigo-200/50 dark:hover:bg-indigo-500/30"
                                         )}
                                         // 强制通过 style 设置颜色，防止 tailwind 类冲突
                                         style={{ color: isPanelOpen ? '#ffffff' : '#4f46e5' }}
@@ -328,10 +328,10 @@ export const ShareParser: React.FC = () => {
                             transition={{ type: 'spring', damping: 20, stiffness: 300 }}
                             className="absolute bottom-full right-0 z-50 pointer-events-none pb-2"
                         >
-                            <div className="glass-effect !bg-white/95 !backdrop-blur-3xl rounded-[1.5rem] p-1.5 shadow-[0_30px_70px_-10px_rgba(0,0,0,0.3)] ring-1 ring-black/[0.08] border-white/80 pointer-events-auto inline-block min-w-max">
+                            <div className="glass-effect !bg-white/95 dark:!bg-slate-900/95 !backdrop-blur-3xl rounded-[1.5rem] p-1.5 shadow-[0_30px_70px_-10px_rgba(0,0,0,0.3)] ring-1 ring-black/[0.08] dark:ring-white/[0.06] border-white/80 dark:border-slate-700/60 pointer-events-auto inline-block min-w-max">
                                 <DownloadManager />
                             </div>
-                            <div className="absolute -bottom-1 right-5 w-4 h-4 bg-white/95 rotate-45 border-r border-b border-black/[0.03]" />
+                            <div className="absolute -bottom-1 right-5 w-4 h-4 bg-white/95 dark:bg-slate-900/95 rotate-45 border-r border-b border-black/[0.03] dark:border-slate-700/60" />
                         </motion.div>
                     )}
                 </AnimatePresence>

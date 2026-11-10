@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ShieldCheck, HardDrive, Info, Settings } from 'lucide-react';
+import { ShieldCheck, HardDrive, Info } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { useQuarkStore } from './store/useQuarkStore';
 import { quarkApi } from './services/quarkApi';
 import { ShareParser } from './features/share-parse/ShareParser';
 import { HelpView } from './features/help/HelpView';
+import { SettingsView } from './features/settings/SettingsView';
 import { FileTree } from './features/file-tree/FileTree';
 import { Badge } from './components/ui/badge';
 import { MainLayout } from './components/MainLayout';
@@ -81,10 +82,10 @@ function App() {
                   Quark Engine v2.0 安全连接已就绪
                 </Badge>
               </motion.div>
-              <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 mb-1">
+              <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100 mb-1">
                 链接提取 <span className="gradient-text">从未如此简单</span>
               </h1>
-              <p className="text-slate-500 text-sm max-w-2xl leading-relaxed font-medium">
+              <p className="text-slate-500 dark:text-slate-400 text-sm max-w-2xl leading-relaxed font-medium">
                 粘贴您的分享链接，我们将为您自动化处理剩余的一切。
               </p>
             </section>
@@ -112,14 +113,14 @@ function App() {
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="flex-1 flex flex-col items-center justify-center text-center space-y-4 glass-effect rounded-[2.5rem] border-dashed border-2 border-slate-200/60"
+                    className="flex-1 flex flex-col items-center justify-center text-center space-y-4 glass-effect rounded-[2.5rem] border-dashed border-2 border-slate-200/60 dark:border-slate-700/60"
                   >
-                    <div className="w-16 h-16 bg-slate-100/50 rounded-3xl flex items-center justify-center text-slate-300">
+                    <div className="w-16 h-16 bg-slate-100/50 dark:bg-slate-800/50 rounded-3xl flex items-center justify-center text-slate-300 dark:text-slate-600">
                       <HardDrive size={32} strokeWidth={1.5} />
                     </div>
                     <div className="space-y-1">
-                      <h3 className="text-slate-800 font-bold text-lg">等待任务投递</h3>
-                      <p className="text-slate-400 text-xs max-w-xs font-medium">
+                      <h3 className="text-slate-800 dark:text-slate-100 font-bold text-lg">等待任务投递</h3>
+                      <p className="text-slate-400 dark:text-slate-500 text-xs max-w-xs font-medium">
                         在上方粘贴链接，开启极速解析体验
                       </p>
                     </div>
@@ -138,11 +139,11 @@ function App() {
             exit={{ opacity: 0, y: -20 }}
             className="flex-1 flex flex-col items-center justify-center"
           >
-            <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center text-slate-400 mb-4">
+            <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-2xl flex items-center justify-center text-slate-400 dark:text-slate-500 mb-4">
               <Info size={32} />
             </div>
-            <h2 className="text-xl font-bold text-slate-800">解析历史开发中</h2>
-            <p className="text-slate-500 font-medium">即将上线，敬请期待...</p>
+            <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">解析历史开发中</h2>
+            <p className="text-slate-500 dark:text-slate-400 font-medium">即将上线，敬请期待...</p>
           </motion.div>
         )}
 
@@ -152,13 +153,9 @@ function App() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="flex-1 flex flex-col items-center justify-center"
+            className="flex-1 flex flex-col min-h-0"
           >
-            <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center text-slate-400 mb-4">
-              <Settings size={32} />
-            </div>
-            <h2 className="text-xl font-bold text-slate-800">软件设置开发中</h2>
-            <p className="text-slate-500 font-medium">即将上线，敬请期待...</p>
+            <SettingsView />
           </motion.div>
         )}
 

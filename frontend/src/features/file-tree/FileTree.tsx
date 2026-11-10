@@ -37,18 +37,32 @@ const getFileIcon = (name: string, isDir: boolean) => {
 const SIZE_COL_CLASS = 'file-tree-size-col items-center justify-end overflow-hidden text-right whitespace-nowrap';
 const DATE_COL_CLASS = 'file-tree-date-col items-center justify-end overflow-hidden text-right whitespace-nowrap';
 
+/// 递归收集节点（含嵌套子文件夹）下所有文件的 fid
+const collectFileFids = (node: ShareFileNode): string[] => {
+    const out: string[] = [];
+    if (!node.isDir) out.push(node.fid);
+    for (const c of node.children || []) out.push(...collectFileFids(c));
+    return out;
+};
+
 interface FileRowProps {
     node: ShareFileNode;
     onToggleExpand: (node: ShareFileNode) => void;
 }
 
 const FileRow: React.FC<FileRowProps> = ({ node, onToggleExpand }) => {
-    const { selectedFids, toggleFileSelection } = useQuarkStore();
+    const { selectedFids, toggleFileSelection, toggleFolderSelection } = useQuarkStore();
     const isSelected = selectedFids.has(node.fid);
     const sizeText = formatSize(node.size);
     const updatedText = node.updated_at ? formatTime(node.updated_at) : '';
     const updatedDateText = updatedText.split(' ')[0] || '';
     const indentWidth = Math.min(node.depth * 14, 84);
+
+    // 文件夹三态：全选 / 半选 / 未选
+    const descendantFids = node.isDir ? collectFileFids(node) : [];
+    const selectedCount = node.isDir ? descendantFids.filter((f) => selectedFids.has(f)).length : 0;
+    const dirChecked = descendantFids.length > 0 && selectedCount === descendantFids.length;
+    const dirIndeterminate = selectedCount > 0 && selectedCount < descendantFids.length;
 
     return (
         <motion.div
@@ -56,9 +70,9 @@ const FileRow: React.FC<FileRowProps> = ({ node, onToggleExpand }) => {
             initial={{ opacity: 0, y: 5 }}
             animate={{ opacity: 1, y: 0 }}
             className={cn(
-                'group flex w-full min-w-0 items-center gap-2 border-b border-slate-100/30 px-3 py-2.5 transition-all duration-200 sm:gap-3 sm:px-4 sm:py-3 lg:px-6',
+                'group flex w-full min-w-0 items-center gap-2 border-b border-slate-100/30 dark:border-slate-700/30 px-3 py-2.5 transition-all duration-200 sm:gap-3 sm:px-4 sm:py-3 lg:px-6',
                 node.isDir ? "cursor-pointer hover:bg-emerald-500/10" : "hover:bg-emerald-500/5",
-                isSelected && !node.isDir && 'bg-emerald-500/10 border-l-4 border-l-emerald-500 pl-2 sm:pl-3 lg:pl-5 shadow-sm'
+                isSelected && !node.isDir && 'bg-emerald-500/10 dark:bg-emerald-500/15 border-l-4 border-l-emerald-500 pl-2 sm:pl-3 lg:pl-5 shadow-sm'
             )}
             onClick={() => node.isDir && onToggleExpand(node)}
         >
@@ -66,23 +80,30 @@ const FileRow: React.FC<FileRowProps> = ({ node, onToggleExpand }) => {
                 {node.isDir && (
                     <motion.div
                         animate={{ rotate: node.expanded ? 90 : 0 }}
-                        className="text-slate-400"
+                        className="text-slate-400 dark:text-slate-500"
                     >
                         <ChevronRight size={14} strokeWidth={3} className="sm:w-4 sm:h-4" />
                     </motion.div>
                 )}
             </div>
 
-            {!node.isDir && (
-                <div className="w-4 shrink-0 sm:w-5">
+            <div className="w-4 shrink-0 sm:w-5">
+                {node.isDir ? (
+                    <Checkbox
+                        checked={dirChecked ? true : dirIndeterminate ? 'indeterminate' : false}
+                        disabled={descendantFids.length === 0}
+                        onCheckedChange={() => toggleFolderSelection(node)}
+                        onClick={(e) => e.stopPropagation()}
+                        title="勾选/取消该文件夹内所有文件"
+                    />
+                ) : (
                     <Checkbox
                         checked={isSelected}
                         onCheckedChange={() => toggleFileSelection(node.fid)}
                         onClick={(e) => e.stopPropagation()}
                     />
-                </div>
-            )}
-            {node.isDir && <div className="w-4 shrink-0 sm:w-5" />}
+                )}
+            </div>
 
             <div className="shrink-0 transition-transform duration-200 group-hover:scale-110">
                 {getFileIcon(node.file_name, node.isDir)}
@@ -90,7 +111,7 @@ const FileRow: React.FC<FileRowProps> = ({ node, onToggleExpand }) => {
 
             <div className="min-w-0 flex-1">
                 <div className="min-w-0" style={{ paddingLeft: indentWidth }}>
-                    <p className={cn('truncate font-normal text-[clamp(11px,0.9vw,14px)]', node.isDir ? 'text-slate-900' : 'text-slate-700')}>
+                    <p className={cn('truncate font-normal text-[clamp(11px,0.9vw,14px)]', node.isDir ? 'text-slate-900 dark:text-slate-100' : 'text-slate-700 dark:text-slate-200')}>
                         {node.file_name}
                     </p>
                 </div>
@@ -98,7 +119,7 @@ const FileRow: React.FC<FileRowProps> = ({ node, onToggleExpand }) => {
 
             <div className={SIZE_COL_CLASS}>
                 {!node.isDir && (
-                    <span title={sizeText} className="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-[clamp(10px,0.8vw,12px)] font-normal text-slate-700 tabular-nums">
+                    <span title={sizeText} className="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-[clamp(10px,0.8vw,12px)] font-normal text-slate-700 dark:text-slate-200 tabular-nums">
                         {sizeText}
                     </span>
                 )}
@@ -106,7 +127,7 @@ const FileRow: React.FC<FileRowProps> = ({ node, onToggleExpand }) => {
 
             <div className={DATE_COL_CLASS}>
                 {updatedDateText ? (
-                    <span title={updatedText} className="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-[clamp(10px,0.8vw,12px)] font-normal text-slate-500 tabular-nums">
+                    <span title={updatedText} className="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-[clamp(10px,0.8vw,12px)] font-normal text-slate-500 dark:text-slate-400 tabular-nums">
                         {updatedDateText}
                     </span>
                 ) : null}
@@ -147,9 +168,9 @@ export const FileTree: React.FC = () => {
     if (shareInfo.files.length === 0) return null;
 
     return (
-        <div className="file-tree-panel glass-effect flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-[1.5rem] border-white/40">
+        <div className="file-tree-panel glass-effect flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-[1.5rem] border-white/40 dark:border-slate-700/40">
             <ScrollArea className="min-h-0 flex-1" type="auto">
-                <div className="sticky top-0 z-10 flex w-full min-w-0 items-center gap-2 border-b border-white/20 bg-white/70 px-3 py-3 text-[11px] font-semibold tracking-[0.08em] text-slate-500 backdrop-blur-xl sm:gap-3 sm:px-4 sm:py-4 lg:px-6">
+                <div className="sticky top-0 z-10 flex w-full min-w-0 items-center gap-2 border-b border-white/20 dark:border-slate-700/40 bg-white/70 dark:bg-slate-900/70 px-3 py-3 text-[11px] font-semibold tracking-[0.08em] text-slate-500 dark:text-slate-400 backdrop-blur-xl sm:gap-3 sm:px-4 sm:py-4 lg:px-6">
                     <div className="w-4 shrink-0 sm:w-5" />
                     <div className="w-4 shrink-0 sm:w-5" />
                     <div className="w-[18px] shrink-0" />
@@ -162,8 +183,8 @@ export const FileTree: React.FC = () => {
                 </div>
             </ScrollArea>
 
-            <div className="shrink-0 border-t border-white/20 bg-white/40 p-3 text-center">
-                <Badge variant="secondary" className="bg-transparent border-0 text-slate-400 font-bold">
+            <div className="shrink-0 border-t border-white/20 dark:border-slate-700/40 bg-white/40 dark:bg-slate-900/40 p-3 text-center">
+                <Badge variant="secondary" className="bg-transparent border-0 text-slate-400 dark:text-slate-500 font-bold">
                     显示范围：当前根目录及所有子目录
                 </Badge>
             </div>

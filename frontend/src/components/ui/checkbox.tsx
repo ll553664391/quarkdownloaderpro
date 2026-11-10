@@ -1,6 +1,6 @@
 import * as React from "react"
 import * as CheckboxPrimitive from "@radix-ui/react-checkbox"
-import { Check } from "lucide-react"
+import { Check, Minus } from "lucide-react"
 import { cn } from "../../utils"
 
 const Checkbox = React.forwardRef<
@@ -10,7 +10,7 @@ const Checkbox = React.forwardRef<
     <CheckboxPrimitive.Root
         ref={ref}
         className={cn(
-            "peer h-5 w-5 shrink-0 rounded-lg border-2 border-slate-200 bg-white ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-indigo-500 data-[state=checked]:border-indigo-500 data-[state=checked]:text-white transition-all",
+            "group peer h-5 w-5 shrink-0 rounded-lg border-2 border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-indigo-500 data-[state=checked]:border-indigo-500 data-[state=checked]:text-white data-[state=indeterminate]:bg-indigo-500 data-[state=indeterminate]:border-indigo-500 data-[state=indeterminate]:text-white transition-all",
             className
         )}
         {...props}
@@ -18,7 +18,8 @@ const Checkbox = React.forwardRef<
         <CheckboxPrimitive.Indicator
             className={cn("flex items-center justify-center text-current")}
         >
-            <Check className="h-3.5 w-3.5" strokeWidth={4} />
+            <Check className="hidden h-3.5 w-3.5 group-data-[state=checked]:block" strokeWidth={4} />
+            <Minus className="hidden h-3.5 w-3.5 group-data-[state=indeterminate]:block" strokeWidth={4} />
         </CheckboxPrimitive.Indicator>
     </CheckboxPrimitive.Root>
 ))

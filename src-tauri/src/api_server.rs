@@ -1,7 +1,7 @@
 use axum::{
     Router,
     extract::Query,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -12,9 +12,22 @@ use tower_http::cors::{CorsLayer, Any};
 
 use crate::quark_client;
 
+/// 允许的来源白名单：仅 Tauri WebView 自身（生产）与 Vite 开发服务器（dev）。
+/// 防止浏览器中任意恶意网页通过 CORS 读取本地 API 响应（含登录 Cookie）。
+const ALLOWED_ORIGINS: [&str; 3] = [
+    "http://tauri.localhost",  // Tauri v2 生产环境（Windows/macOS WebView）
+    "tauri://localhost",       // Tauri v2 自定义协议（Linux 等）
+    "http://127.0.0.1:1420",   // dev 模式 Vite 开发服务器
+];
+
 pub fn create_router() -> Router {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(
+            ALLOWED_ORIGINS
+                .iter()
+                .map(|o| HeaderValue::from_static(o))
+                .collect::<Vec<HeaderValue>>(),
+        )
         .allow_methods(Any)
         .allow_headers(Any)
         .expose_headers([header::HeaderName::from_static("x-append-cookie")]);

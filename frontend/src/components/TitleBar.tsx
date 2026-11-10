@@ -24,19 +24,19 @@ const WindowsControls: React.FC<{
     <div className="flex items-center h-full">
         <button
             onClick={onMinimize}
-            className="inline-flex items-center justify-center w-[46px] h-full text-black/90 hover:bg-black/[.05] active:bg-black/[.03] transition-colors"
+            className="inline-flex items-center justify-center w-[46px] h-full text-black/90 hover:bg-black/[.05] active:bg-black/[.03] dark:text-white/90 dark:hover:bg-white/[.08] dark:active:bg-white/[.05] transition-colors"
         >
             <Minus size={15} strokeWidth={1.5} />
         </button>
         <button
             onClick={onToggleMaximize}
-            className="inline-flex items-center justify-center w-[46px] h-full text-black/90 hover:bg-black/[.05] active:bg-black/[.03] transition-colors"
+            className="inline-flex items-center justify-center w-[46px] h-full text-black/90 hover:bg-black/[.05] active:bg-black/[.03] dark:text-white/90 dark:hover:bg-white/[.08] dark:active:bg-white/[.05] transition-colors"
         >
             {isMaximized ? <Copy size={13} strokeWidth={1.5} /> : <Square size={13} strokeWidth={1.5} />}
         </button>
         <button
             onClick={onClose}
-            className="inline-flex items-center justify-center w-[46px] h-full text-black/90 hover:bg-[#c42b1c] hover:text-white active:bg-[#c42b1c]/90 transition-colors"
+            className="inline-flex items-center justify-center w-[46px] h-full text-black/90 hover:bg-[#c42b1c] hover:text-white active:bg-[#c42b1c]/90 dark:text-white/90 transition-colors"
         >
             <X size={15} strokeWidth={1.5} />
         </button>
@@ -135,7 +135,7 @@ export const TitleBar: React.FC = () => {
             {isMac && controls}
 
             <div className="flex items-center pl-4" data-tauri-drag-region>
-                <span className="text-xs font-medium text-slate-400 tracking-tight">
+                <span className="text-xs font-medium text-slate-400 dark:text-slate-500 tracking-tight">
                     Quark Downloader Pro
                 </span>
             </div>

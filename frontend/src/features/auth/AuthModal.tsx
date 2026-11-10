@@ -148,7 +148,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onLogout 
             <DialogContent className="max-w-[420px] p-8">
                 <DialogHeader className="mb-8">
                     <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600">
+                        <div className="w-10 h-10 bg-indigo-50 dark:bg-indigo-500/15 rounded-2xl flex items-center justify-center text-indigo-600 dark:text-indigo-400">
                             <ShieldCheck size={24} />
                         </div>
                         <div>
@@ -178,7 +178,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onLogout 
                         <TabsContent value="qr" className="flex flex-col items-center outline-none">
                             <div className="relative group">
                                 <div className="absolute -inset-4 bg-gradient-to-tr from-indigo-500 to-purple-500 rounded-[2rem] blur opacity-10 group-hover:opacity-20 transition duration-500"></div>
-                                <div className="relative w-52 h-52 bg-white rounded-3xl flex items-center justify-center border-2 border-slate-100 shadow-inner overflow-hidden">
+                                <div className="relative w-52 h-52 bg-white rounded-3xl flex items-center justify-center border-2 border-slate-100 dark:border-slate-700 shadow-inner overflow-hidden">
                                     {qrStatus === 'active' ? (
                                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                                             <QRCodeSVG value={qrUrl} size={170} />
@@ -212,13 +212,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onLogout 
                             </div>
 
                             <div className="mt-8 text-center px-4">
-                                <p className={qrStatus === 'error' ? "text-rose-500 text-sm font-bold" : "text-slate-600 text-sm font-bold"}>
+                                <p className={qrStatus === 'error' ? "text-rose-500 text-sm font-bold" : "text-slate-600 dark:text-slate-300 text-sm font-bold"}>
                                     {qrHint}
                                 </p>
                                 {qrStatus === 'active' && timeLeft > 0 && (
                                     <div className="mt-2 flex items-center justify-center gap-2">
                                         <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping" />
-                                        <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase">
+                                        <p className="text-[10px] text-slate-400 dark:text-slate-500 font-bold tracking-widest uppercase">
                                             剩余 {timeLeft} 秒
                                         </p>
                                     </div>
@@ -238,14 +238,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onLogout 
 
                         <TabsContent value="cookie" className="space-y-6 outline-none">
                             <div className="space-y-3">
-                                <label className="text-xs font-bold text-slate-400 uppercase tracking-widest pl-1">
+                                <label className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest pl-1">
                                     夸克网盘 Cookie
                                 </label>
                                 <textarea
                                     value={cookieInput}
                                     onChange={(e) => setCookieInput(e.target.value)}
                                     placeholder="粘贴完整的 Cookie 字符串..."
-                                    className="w-full min-h-[140px] p-4 text-xs font-mono bg-slate-50 border border-slate-100 rounded-2xl focus:ring-2 focus:ring-indigo-500/20 focus:bg-white focus:border-indigo-500 outline-none transition-all resize-none"
+                                    className="w-full min-h-[140px] p-4 text-xs font-mono bg-slate-50 dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-2xl focus:ring-2 focus:ring-indigo-500/20 focus:bg-white dark:focus:bg-slate-800 focus:border-indigo-500 outline-none transition-all resize-none"
                                 />
                             </div>
                             <div className="flex gap-3">
@@ -260,14 +260,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onLogout 
                                 <Button
                                     onClick={clearCookie}
                                     variant="outline"
-                                    className="px-6 rounded-xl h-12 font-bold text-slate-500"
+                                    className="px-6 rounded-xl h-12 font-bold text-slate-500 dark:text-slate-400"
                                 >
                                     重置
                                 </Button>
                             </div>
-                            <div className="flex items-start gap-3 p-4 bg-indigo-50/50 rounded-2xl border border-indigo-100/50">
+                            <div className="flex items-start gap-3 p-4 bg-indigo-50/50 dark:bg-indigo-500/10 rounded-2xl border border-indigo-100/50 dark:border-indigo-500/30">
                                 <ExternalLink className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
-                                <p className="text-[11px] text-indigo-700 font-medium leading-relaxed">
+                                <p className="text-[11px] text-indigo-700 dark:text-indigo-300 font-medium leading-relaxed">
                                     提示：打开 <a href="https://pan.quark.cn" target="_blank" rel="noreferrer" className="underline font-bold">pan.quark.cn</a> 登录后，提取 Cookie。
                                 </p>
                             </div>

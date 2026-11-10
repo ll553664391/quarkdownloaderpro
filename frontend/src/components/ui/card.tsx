@@ -83,7 +83,7 @@ const SearchContainer = React.forwardRef<
     <div
         ref={ref}
         className={cn(
-            "relative flex items-center bg-white rounded-2xl p-1 shadow-sm border border-slate-100",
+            "relative flex items-center bg-white dark:bg-slate-800 rounded-2xl p-1 shadow-sm border border-slate-100 dark:border-slate-700",
             className
         )}
         {...props}

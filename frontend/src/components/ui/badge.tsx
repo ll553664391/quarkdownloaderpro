@@ -14,10 +14,10 @@ const badgeVariants = cva(
                 destructive:
                     "border-transparent bg-destructive text-destructive-foreground shadow hover:bg-destructive/80",
                 outline: "text-foreground",
-                emerald: "bg-emerald-50 text-emerald-600 border-emerald-100",
-                indigo: "bg-indigo-50 text-indigo-600 border-indigo-100",
-                rose: "bg-rose-50 text-rose-600 border-rose-100",
-                amber: "bg-amber-50 text-amber-600 border-amber-100",
+                emerald: "bg-emerald-50 text-emerald-600 border-emerald-100 dark:bg-emerald-500/15 dark:text-emerald-400 dark:border-emerald-500/30",
+                indigo: "bg-indigo-50 text-indigo-600 border-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-400 dark:border-indigo-500/30",
+                rose: "bg-rose-50 text-rose-600 border-rose-100 dark:bg-rose-500/15 dark:text-rose-400 dark:border-rose-500/30",
+                amber: "bg-amber-50 text-amber-600 border-amber-100 dark:bg-amber-500/15 dark:text-amber-400 dark:border-amber-500/30",
             },
         },
         defaultVariants: {

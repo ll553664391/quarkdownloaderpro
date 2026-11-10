@@ -50,6 +50,9 @@ interface QuarkState {
     selectedFids: Set<string>;
     downloadConcurrency: number;
     downloadThreads: number;
+    downloadDir: string;
+    theme: 'light' | 'dark';
+    taskStartedAt: number;
     activeDownloads: Map<string, DownloadInfo>;
 
     setCookie: (cookie: string) => void;
@@ -60,9 +63,13 @@ interface QuarkState {
     clearLogs: () => void;
     setDownloadConcurrency: (value: number) => void;
     setDownloadThreads: (value: number) => void;
+    setDownloadDir: (dir: string) => void;
+    setTheme: (theme: 'light' | 'dark') => void;
+    setTaskStartedAt: (ts: number) => void;
     setLoggingOut: (isLoggingOut: boolean) => void;
     notify: (message: string, type: 'info' | 'success' | 'error' | 'warn', durationMs?: number) => void;
     toggleFileSelection: (fid: string) => void;
+    toggleFolderSelection: (node: ShareFileNode) => void;
     selectAllFiles: (fids: string[]) => void;
     clearSelection: () => void;
     setDownloading: (downloading: boolean) => void;
@@ -105,7 +112,10 @@ export const useQuarkStore = create<QuarkState>((set) => ({
     },
     selectedFids: new Set<string>(),
     downloadConcurrency: Number(localStorage.getItem('download_concurrency')) || 5,
-    downloadThreads: Number(localStorage.getItem('download_threads')) || 999,
+    downloadThreads: Math.min(256, Number(localStorage.getItem('download_threads')) || 999),
+    downloadDir: localStorage.getItem('download_dir') || '',
+    theme: (localStorage.getItem('theme') === 'dark' ? 'dark' : 'light'),
+    taskStartedAt: 0,
     activeDownloads: new Map<string, DownloadInfo>(),
 
     setCookie: (cookie: string) => {
@@ -127,7 +137,14 @@ export const useQuarkStore = create<QuarkState>((set) => ({
             info.allFiles = flatten(info.files);
         }
 
-        set((state: QuarkState) => ({ shareInfo: { ...state.shareInfo, ...info } }));
+        set((state: QuarkState) => {
+            const next: Partial<QuarkState> = { shareInfo: { ...state.shareInfo, ...info } };
+            // 解析完成（files 有值）时默认全选所有文件
+            if (info.files && info.allFiles) {
+                next.selectedFids = new Set(info.allFiles.map((f: ShareFileNode) => f.fid));
+            }
+            return next;
+        });
     },
     addLog: (message: string, type: LogEntry['type'] = 'info') => {
         const newLog: LogEntry = {
@@ -135,21 +152,32 @@ export const useQuarkStore = create<QuarkState>((set) => ({
             type,
             timestamp: Date.now(),
         };
-        set((state: QuarkState) => ({ logs: [newLog, ...state.logs] }));
+        set((state: QuarkState) => ({ logs: [newLog, ...state.logs].slice(0, 500) }));
     },
     clearLogs: () => set({ logs: [] }),
     setDownloadConcurrency: (value: number) => {
-        const normalized = Math.max(1, Math.min(10, value));
+        const normalized = Math.max(1, Math.min(20, value));
         localStorage.setItem('download_concurrency', normalized.toString());
 
         set({ downloadConcurrency: normalized });
     },
     setDownloadThreads: (value: number) => {
-        const normalized = Math.max(1, Math.min(999, value));
+        const normalized = Math.max(1, Math.min(256, value));
         localStorage.setItem('download_threads', normalized.toString());
 
         set({ downloadThreads: normalized });
     },
+    setDownloadDir: (dir: string) => {
+        localStorage.setItem('download_dir', dir);
+        set({ downloadDir: dir });
+    },
+    setTheme: (theme: 'light' | 'dark') => {
+        localStorage.setItem('theme', theme);
+        // 立即切换 html.dark 类，Tailwind darkMode: ["class"] 据此生效
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+        set({ theme });
+    },
+    setTaskStartedAt: (ts: number) => set({ taskStartedAt: ts }),
     notify: (message: string, type: 'info' | 'success' | 'error' | 'warn', durationMs?: number) => {
         const toastId = Date.now() + Math.random();
         const timeout = durationMs ?? 3000;
@@ -172,6 +200,25 @@ export const useQuarkStore = create<QuarkState>((set) => ({
     }),
     selectAllFiles: (fids: string[]) => set({ selectedFids: new Set(fids) }),
     clearSelection: () => set({ selectedFids: new Set<string>() }),
+    toggleFolderSelection: (node: ShareFileNode) => set((state: QuarkState) => {
+        // 递归收集该文件夹（含嵌套子文件夹）下所有文件的 fid
+        const collect = (n: ShareFileNode): string[] => {
+            const out: string[] = [];
+            if (!n.isDir) out.push(n.fid);
+            for (const c of n.children || []) out.push(...collect(c));
+            return out;
+        };
+        const fids = collect(node);
+        if (fids.length === 0) return {};
+
+        const newSet = new Set(state.selectedFids);
+        const allSelected = fids.every((f) => newSet.has(f));
+        for (const f of fids) {
+            if (allSelected) newSet.delete(f);
+            else newSet.add(f);
+        }
+        return { selectedFids: newSet };
+    }),
     setDownloading: (downloading: boolean) => set({ downloading }),
     setProgress: (done: number, total: number, text: string) => set({ progress: { done, total, text } }),
     updateDownload: (id: string, info: Partial<DownloadInfo> & { filename: string }) => set((state: QuarkState) => {

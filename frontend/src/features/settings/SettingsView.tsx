@@ -1,11 +1,11 @@
 import React from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Sun, Moon, FolderOpen, RotateCcw, Palette, HardDrive } from 'lucide-react';
+import { Sun, Moon, FolderOpen, RotateCcw, Palette, HardDrive, Gauge } from 'lucide-react';
 import { useQuarkStore } from '../../store/useQuarkStore';
 import { cn, getErrorMessage } from '../../utils';
 
 export const SettingsView: React.FC = () => {
-    const { theme, setTheme, downloadDir, setDownloadDir, notify } = useQuarkStore();
+    const { theme, setTheme, downloadDir, setDownloadDir, downloadConcurrency, setDownloadConcurrency, notify } = useQuarkStore();
 
     const handlePickDir = async () => {
         try {
@@ -90,6 +90,35 @@ export const SettingsView: React.FC = () => {
                                 </button>
                             );
                         })}
+                    </div>
+                </div>
+
+                {/* 同时最高下载数量 */}
+                <div className="glass-effect rounded-[1.5rem] p-5">
+                    <div className="mb-4">
+                        <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100">同时最高下载数量</h3>
+                        <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
+                            同时下载的文件数上限；单文件下载线程按 32 ÷ 并发数自动调整，无需单独设置
+                        </p>
+                    </div>
+                    <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl bg-white/60 dark:bg-slate-800/50 border border-slate-200/70 dark:border-slate-700/60 shrink-0">
+                            <Gauge size={16} className="text-indigo-500" />
+                            <span className="text-sm font-black text-indigo-600 dark:text-indigo-300 tabular-nums w-4 text-center">
+                                {downloadConcurrency}
+                            </span>
+                        </div>
+                        <input
+                            type="range"
+                            min="1" max="8"
+                            value={downloadConcurrency}
+                            onChange={(e) => setDownloadConcurrency(Number(e.target.value))}
+                            className="flex-1 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                        />
+                        <div className="flex items-center gap-2 shrink-0 text-[10px] font-bold text-slate-400 dark:text-slate-500 tabular-nums">
+                            <span>线程 {Math.max(4, Math.min(64, Math.floor(128 / downloadConcurrency)))}</span>
+                            <span className="px-1.5 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-500/15 text-indigo-500 dark:text-indigo-300">自动</span>
+                        </div>
                     </div>
                 </div>
 

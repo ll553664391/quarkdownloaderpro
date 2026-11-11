@@ -2,14 +2,25 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ShieldCheck, HardDrive, Info } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useQuarkStore } from './store/useQuarkStore';
 import { quarkApi } from './services/quarkApi';
 import { ShareParser } from './features/share-parse/ShareParser';
 import { HelpView } from './features/help/HelpView';
 import { SettingsView } from './features/settings/SettingsView';
+import { DownloadManagerView } from './features/download-manager/DownloadManagerView';
 import { FileTree } from './features/file-tree/FileTree';
 import { Badge } from './components/ui/badge';
 import { MainLayout } from './components/MainLayout';
+
+interface DownloadProgressEvent {
+  id: string;
+  filename: string;
+  downloaded: number;
+  total: number;
+  speed?: number;
+  status?: string;
+}
 
 function App() {
   const {
@@ -18,10 +29,53 @@ function App() {
     setCapacityLoading,
     shareInfo,
     clearAllDownloads,
+    updateDownload,
+    removeDownload,
+    updateDownloadTask,
   } = useQuarkStore();
 
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('parser');
+
+  // download-progress 事件监听挂在 App 顶层（始终挂载）：
+  // 若放在解析页组件内，切到「下载管理」等 tab 时组件卸载会导致监听注销，
+  // 期间事件全部丢失 → 网速不显示 / 显示离开前冻结的旧值
+  useEffect(() => {
+    const unlisten = listen<DownloadProgressEvent>('download-progress', (event) => {
+      // 已请求停止时忽略迟到事件：Rust 端 abort 生效前监控循环可能再发 1~2 次，
+      // 若照常处理会把已标记为 stopped 的任务刷回 downloading（角标残留）。
+      // 开始新任务时 startDownload 会复位 stopRequested，更新恢复正常
+      if (useQuarkStore.getState().stopRequested) return;
+
+      const { id, filename, downloaded, total, speed, status } = event.payload;
+
+      if (status === 'done') {
+        // 下载完成，延迟移除让用户看到 100%
+        updateDownload(id, { filename, downloaded, total, speed: 0, status: 'done' });
+        updateDownloadTask(id, { status: 'done', downloaded, total, speed: 0 });
+        setTimeout(() => removeDownload(id), 2000);
+        return;
+      }
+
+      updateDownload(id, {
+        filename,
+        downloaded,
+        total,
+        speed: speed ?? 0,
+        status: status === 'merging' ? 'merging' : 'downloading',
+      });
+      updateDownloadTask(id, {
+        status: status === 'merging' ? 'merging' : 'downloading',
+        downloaded,
+        total,
+        speed: speed ?? 0,
+      });
+    });
+
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, [updateDownload, removeDownload, updateDownloadTask]);
 
   // 页面加载/刷新时，立即取消所有残留下载任务
   useEffect(() => {
@@ -128,6 +182,19 @@ function App() {
                 )}
               </AnimatePresence>
             </div>
+          </motion.div>
+        )}
+
+        {activeTab === 'downloads' && (
+          <motion.div
+            key="downloads-tab"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            transition={{ duration: 0.3 }}
+            className="flex-1 flex flex-col min-h-0"
+          >
+            <DownloadManagerView />
           </motion.div>
         )}
 

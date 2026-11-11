@@ -1,22 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { CheckSquare, Square, Zap, FolderOpen, SquareArrowOutUpRight } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { useQuarkStore } from '../../store/useQuarkStore';
 import { quarkApi } from '../../services/quarkApi';
 import { sleep } from '../../utils';
 import { formatSize, cn, getErrorMessage } from '../../utils';
 import { Button } from '../../components/ui/button';
 import type { ShareFileNode } from '../../types/quark';
-
-interface DownloadProgressEvent {
-    id: string;
-    filename: string;
-    downloaded: number;
-    total: number;
-    speed?: number;
-    status?: string;
-}
 
 export const DownloadManager: React.FC = () => {
     const {
@@ -28,48 +18,33 @@ export const DownloadManager: React.FC = () => {
         setDownloading,
         setTaskStartedAt,
         setProgress,
-        updateDownload,
-        removeDownload,
         clearAllDownloads,
+        initDownloadTasks,
+        updateDownloadTask,
+        markTasksStopped,
         addLog,
         clearLogs,
         cookie,
         isLoggedIn,
         downloadConcurrency,
-        downloadThreads,
         downloadDir,
         setDownloadDir,
+        setTaskBytes,
+        addFinishedBytes,
+        adjustTaskTotalBytes,
+        resetTaskBytes,
+        setStopRequested,
         notify
     } = useQuarkStore();
 
-    const stopRef = useRef(false);
     const [lastSavePath, setLastSavePath] = useState('');
 
-    // 监听 Rust 端发送的 download-progress 事件，按 id 更新 activeDownloads
-    useEffect(() => {
-        const unlisten = listen<DownloadProgressEvent>('download-progress', (event) => {
-            const { id, filename, downloaded, total, speed, status } = event.payload;
+    // 流水线停止检查走全局 stopRequested（store）：
+    // 两个「停止」按钮（本组件与下载管理页）共享，避免本组件未挂载/局部 ref 不同步
+    const isStopped = () => useQuarkStore.getState().stopRequested;
 
-            if (status === 'done') {
-                // 下载完成，延迟移除让用户看到 100%
-                updateDownload(id, { filename, downloaded, total, speed: 0, status: 'done' });
-                setTimeout(() => removeDownload(id), 2000);
-                return;
-            }
-
-            updateDownload(id, {
-                filename,
-                downloaded,
-                total,
-                speed: speed ?? 0,
-                status: status === 'merging' ? 'merging' : 'downloading',
-            });
-        });
-
-        return () => {
-            unlisten.then(fn => fn());
-        };
-    }, [updateDownload, removeDownload]);
+    // download-progress 事件监听已提升到 App.tsx 顶层（始终挂载），
+    // 避免切 tab / 关闭悬浮面板时监听被注销导致进度与网速事件丢失
 
     const handleSelectAll = () => {
         if (selectedFids.size === shareInfo.allFiles.length) {
@@ -106,33 +81,46 @@ export const DownloadManager: React.FC = () => {
         }
     };
 
-    const triggerDownload = async (url: string, filename: string, relativePath?: string) => {
+    // 线程数不再单独设置：按同时最高下载数自动调整（128/并发）。
+    // 实测（scripts/speed-test.mjs，19.8GB 文件）：单连接被限速 ~290kbps，速度随连接数近线性增长，
+    // 32→128 连接对应 1.14→3.43 MB/s，故总连接数上限提到 128
+    const threadCount = Math.max(4, Math.min(64, Math.floor(128 / downloadConcurrency)));
+
+    const triggerDownload = async (url: string, filename: string, downloadId: string, relativePath?: string): Promise<boolean> => {
         try {
             const result = await invoke('download_file', {
                 url,
                 cookie,
                 filename,
-                threadCount: downloadThreads,
+                threadCount,
                 saveDir: downloadDir || null,
                 relativePath: relativePath || null,
+                downloadId,
             });
             const res = result as { path?: string; size?: number };
-            if (res.path) setLastSavePath(res.path);
+            if (res.path) {
+                setLastSavePath(res.path);
+                updateDownloadTask(downloadId, { savedPath: res.path });
+            }
             addLog(`  已保存到: ${res.path ?? '未知路径'}`, 'success');
+            return true;
         } catch (error: unknown) {
             const message = getErrorMessage(error);
             // 主动停止触发的取消不算失败
             if (message.includes('取消')) {
                 addLog(`  已停止: ${filename}`, 'warn');
-                return;
+                return false;
             }
             addLog(`下载失败: ${message}`, 'error');
             notify(`下载失败: ${message}`, 'error');
+            return false;
         }
     };
 
     const handleStop = () => {
-        stopRef.current = true;
+        // 先同步置全局停止标志，流水线立即停；再 cancel Rust 端，
+        // 防止 cancel 后流水线又用新 epoch 拉起新任务
+        setStopRequested(true);
         // 立即中断 Rust 端所有下载任务（abort 全部活跃任务，覆盖任何挂起环节）
         invoke('cancel_downloads').catch(() => {});
         // 立即恢复 UI，后台 worker 自行收尾退出
@@ -140,6 +128,8 @@ export const DownloadManager: React.FC = () => {
         setTaskStartedAt(0);
         setProgress(0, 0, '');
         clearAllDownloads();
+        markTasksStopped();
+        resetTaskBytes();
         addLog('已发送停止指令，任务已中止', 'warn');
         notify('任务已停止', 'warn');
     };
@@ -153,7 +143,9 @@ export const DownloadManager: React.FC = () => {
         }
 
         const filesToDownload = shareInfo.allFiles.filter((f: ShareFileNode) => selectedFids.has(f.fid));
-        stopRef.current = false;
+        setStopRequested(false);
+        // 创建迅雷式任务记录：所有选中文件进入队列（含排队/转存阶段，下载管理页全程可见）
+        initDownloadTasks(filesToDownload);
         setDownloading(true);
         setTaskStartedAt(Date.now());
         clearLogs();
@@ -162,8 +154,12 @@ export const DownloadManager: React.FC = () => {
             const total = filesToDownload.length;
             let done = 0;
             let skipped = 0;
-            let nextIndex = 0;
             const concurrency = Math.min(downloadConcurrency, total);
+            // 分批流水线：转存/拿链接/清理接口均原生支持批量数组，20 个/批把每文件 2~5s 的 API 开销降低约 90%
+            const BATCH_SIZE = 20;
+            // 任务级字节账本：整体进度按「全部文件字节」计算，而非仅当前正在下载的文件
+            const totalBytes = filesToDownload.reduce((acc: number, f: ShareFileNode) => acc + (f.size || 0), 0);
+            setTaskBytes(totalBytes);
 
             if (total === 0) {
                 addLog('没有可处理的文件', 'warn');
@@ -172,125 +168,161 @@ export const DownloadManager: React.FC = () => {
             }
 
             setProgress(0, total, `准备中...`);
-            addLog(`开始批量处理，共 ${total} 个文件，并发 ${concurrency}`);
+            addLog(`开始批量处理，共 ${total} 个文件，${BATCH_SIZE} 个/批，并发 ${concurrency}`);
 
-            const processFile = async (index: number) => {
-                if (stopRef.current) return;
-                const f = filesToDownload[index];
-
-                // 文件级断点续传：目标文件已存在（上次已完整下载）则跳过，不再转存/下载
-                try {
-                    const exists = await invoke<boolean>('check_file_exists', {
-                        saveDir: downloadDir || null,
-                        relativePath: f.path || null,
-                        filename: f.file_name,
-                    });
-                    if (exists) {
-                        skipped += 1;
-                        addLog(`[${index + 1}/${total}] 已存在，跳过: ${f.file_name}`);
-                        return;
-                    }
-                } catch {
-                    // 检查失败时照常下载
+            const reportProgress = () => {
+                if (done >= total) {
+                    setProgress(done, total, '全部完成');
+                    setTimeout(() => setProgress(0, 0, ''), 3000);
+                } else {
+                    setProgress(done, total, `正在处理 ${done}/${total}`);
                 }
+            };
 
-                addLog(`[${index + 1}/${total}] 正在处理: ${f.file_name}`);
+            for (let batchStart = 0; batchStart < total; batchStart += BATCH_SIZE) {
+                if (isStopped()) break;
+                const batch = filesToDownload.slice(batchStart, batchStart + BATCH_SIZE);
 
-                let savedFid: string | null = null;
+                // 1) 文件级断点续传：本地已存在的整批剔除，不占用转存/下载名额
+                const toProcess: ShareFileNode[] = [];
+                for (let i = 0; i < batch.length; i++) {
+                    if (isStopped()) break;
+                    const f = batch[i];
+                    try {
+                        const exists = await invoke<boolean>('check_file_exists', {
+                            saveDir: downloadDir || null,
+                            relativePath: f.path || null,
+                            filename: f.file_name,
+                        });
+                        if (exists) {
+                            skipped += 1;
+                            done += 1;
+                            updateDownloadTask(f.fid, { status: 'skipped', downloaded: f.size || 0 });
+                            addFinishedBytes(f.size || 0);
+                            addLog(`[${batchStart + i + 1}/${total}] 已存在，跳过: ${f.file_name}`);
+                            reportProgress();
+                            continue;
+                        }
+                    } catch {
+                        // 检查失败时照常下载
+                    }
+                    toProcess.push(f);
+                }
+                if (isStopped()) break;
+                if (toProcess.length === 0) continue;
+
+                // 2) 批量转存（1 次 API 顶 toProcess.length 次）
+                for (const f of toProcess) {
+                    updateDownloadTask(f.fid, { status: 'saving', downloaded: 0, speed: 0, error: undefined });
+                }
+                addLog(`[转存] 批量转存 ${toProcess.length} 个文件...`);
+                let savedFids: string[] = [];
                 try {
-                    addLog('  正在转存到网盘...');
                     const sr = await quarkApi.saveFiles(
                         shareInfo.pwdId,
                         shareInfo.stoken,
-                        [f.fid],
-                        [f.share_fid_token]
+                        toProcess.map((f) => f.fid),
+                        toProcess.map((f) => f.share_fid_token)
                     );
-
                     if (sr.status !== 200 || !sr.data) {
                         throw new Error(sr.message || '转存失败');
                     }
-
                     const taskId = sr.data.task_id;
-
                     for (let r = 0; r < 20; r++) {
-                        if (stopRef.current) return;
+                        if (isStopped()) break;
                         await sleep(500);
                         const tr = await quarkApi.queryTask(taskId, r);
                         if (tr.data && tr.data.status === 2) {
-                            savedFid = tr.data.save_as?.save_as_top_fids?.[0] ?? null;
+                            savedFids = tr.data.save_as?.save_as_top_fids ?? [];
                             break;
                         }
                     }
-
-                    if (stopRef.current) return;
-
-                    if (!savedFid) {
-                        addLog('  转存超时或未获取到文件 ID，跳过', 'warn');
-                        return;
-                    }
-
-                    addLog('  获取下载链接...');
-                    const dl = await quarkApi.getDownloadUrl([savedFid]);
-                    if (dl.status === 200 && dl.data?.[0]?.download_url) {
-                        // 拿到 CDN URL 后立即删除转存文件（URL 自带鉴权 token，删除后仍有效）
-                        try {
-                            await quarkApi.deleteFiles([savedFid]);
-                            addLog('  转存文件已清理');
-                        } catch (e: unknown) {
-                            addLog(`  转存清理失败: ${getErrorMessage(e)}`, 'warn');
-                        }
-                        savedFid = null; // 已删除，防止 finally 重复处理
-
-                        await triggerDownload(dl.data[0].download_url, f.file_name, f.path);
-                    } else {
-                        addLog(`  获取链接失败: ${dl.message || '未知错误'}`, 'error');
+                    if (!isStopped() && savedFids.length === 0) {
+                        throw new Error('转存超时或未获取到文件 ID');
                     }
                 } catch (error: unknown) {
                     const message = getErrorMessage(error);
-                    addLog(`  处理出错: ${message}`, 'error');
-                } finally {
-                    // 如果在获取下载链接之前就失败了，savedFid 仍不为 null，需要兜底清理
-                    if (savedFid) {
-                        try {
-                            await quarkApi.deleteFiles([savedFid]);
-                            addLog('  转存文件已兜底清理');
-                        } catch (e: unknown) {
-                            addLog(`  兜底清理失败: ${getErrorMessage(e)}`, 'warn');
+                    addLog(`[转存] 批量转存失败: ${message}`, 'error');
+                    for (const f of toProcess) {
+                        updateDownloadTask(f.fid, { status: 'failed', error: message });
+                        adjustTaskTotalBytes(-(f.size || 0));
+                        done += 1;
+                    }
+                    reportProgress();
+                    continue;
+                }
+                if (isStopped()) {
+                    // 停止时兜底清理已转存文件，不留网盘垃圾
+                    if (savedFids.length > 0) {
+                        quarkApi.deleteFiles(savedFids).catch(() => {});
+                    }
+                    break;
+                }
+
+                // save_as_top_fids 与入参顺序一致；长度异常时按序号兜底
+                const savedFidByIndex = toProcess.map((_, i) => savedFids[i] ?? null);
+
+                // 3) 批量获取下载链接（1 次 API）
+                addLog(`[链接] 批量获取 ${savedFids.length} 个下载链接...`);
+                const urlBySavedFid = new Map<string, string>();
+                try {
+                    const dl = await quarkApi.getDownloadUrl(savedFids);
+                    if (dl.status === 200 && dl.data) {
+                        for (let i = 0; i < dl.data.length; i++) {
+                            const item = dl.data[i];
+                            // 优先按响应中的 fid 匹配，字段缺失时按序号兜底
+                            const savedFid = (item as { fid?: string }).fid || savedFids[i];
+                            if (item.download_url && savedFid) {
+                                urlBySavedFid.set(savedFid, item.download_url);
+                            }
                         }
                     }
+                } catch (error: unknown) {
+                    addLog(`[链接] 批量获取链接失败: ${getErrorMessage(error)}`, 'error');
+                }
 
-                    done += 1;
-                    if (done >= total) {
-                        setProgress(done, total, '全部完成');
-                        setTimeout(() => {
-                            setProgress(0, 0, '');
-                        }, 3000);
+                // 4) 拿到链接后批量删除转存文件（URL 自带鉴权 token，删除后仍有效）
+                if (savedFids.length > 0) {
+                    try {
+                        await quarkApi.deleteFiles(savedFids);
+                        addLog('[清理] 本批转存文件已清理');
+                    } catch (e: unknown) {
+                        addLog(`[清理] 转存清理失败: ${getErrorMessage(e)}`, 'warn');
+                    }
+                }
+
+                // 5) 并发下载本批（沿用同时最高下载数设置）
+                let next = 0;
+                const downloadOne = async (f: ShareFileNode, savedFid: string | null) => {
+                    const url = savedFid ? urlBySavedFid.get(savedFid) : undefined;
+                    if (!url) {
+                        addLog(`  获取链接失败: ${f.file_name}`, 'error');
+                        updateDownloadTask(f.fid, { status: 'failed', error: '获取链接失败' });
+                        adjustTaskTotalBytes(-(f.size || 0));
                     } else {
-                        const progressText = `正在处理 ${done}/${total}`;
-                        setProgress(done, total, progressText);
+                        updateDownloadTask(f.fid, { status: 'downloading' });
+                        const ok = await triggerDownload(url, f.file_name, f.fid, f.path);
+                        if (ok) {
+                            addFinishedBytes(f.size || 0);
+                        } else {
+                            adjustTaskTotalBytes(-(f.size || 0));
+                        }
                     }
-                }
-            };
-
-            const worker = async () => {
-                while (!stopRef.current) {
-                    const index = nextIndex;
-                    nextIndex += 1;
-                    if (index >= total) return;
-
-                    await processFile(index);
-
-                    if (stopRef.current) return;
-
-                    if (nextIndex < total) {
-                        await sleep(300);
+                    done += 1;
+                    reportProgress();
+                };
+                const worker = async () => {
+                    while (!isStopped()) {
+                        const idx = next;
+                        next += 1;
+                        if (idx >= toProcess.length) return;
+                        await downloadOne(toProcess[idx], savedFidByIndex[idx]);
                     }
-                }
-            };
+                };
+                await Promise.all(Array.from({ length: concurrency }, () => worker()));
+            }
 
-            await Promise.all(Array.from({ length: concurrency }, () => worker()));
-
-            if (stopRef.current) {
+            if (isStopped()) {
                 // 停止提示已在 handleStop 中给出，这里仅记录汇总日志
                 addLog(`任务已停止，已完成 ${done}/${total}`, 'warn');
                 setProgress(0, 0, '');
@@ -376,7 +408,7 @@ export const DownloadManager: React.FC = () => {
                     )}
 
                     <div className="hidden sm:flex items-center px-2.5 h-8 bg-slate-50/80 dark:bg-slate-800/80 rounded-lg border border-slate-100/50 dark:border-slate-700/50">
-                        <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-tighter">线程 {downloadThreads} · 并行 {downloadConcurrency}</span>
+                        <span className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-tighter">并行 {downloadConcurrency} · 线程 {threadCount}（自动）</span>
                     </div>
 
                     {downloading ? (

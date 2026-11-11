@@ -25,6 +25,16 @@ export function formatTime(ts: number) {
 
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** 秒数 → mm:ss / h:mm:ss */
+export function fmtDuration(s: number): string {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return h > 0
+        ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+        : `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
 const HTTP_STATUS_MESSAGE: Record<number, string> = {
     400: '请求参数错误，请检查输入内容',
     401: '登录状态已失效，请重新登录',

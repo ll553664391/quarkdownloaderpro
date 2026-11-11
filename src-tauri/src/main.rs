@@ -299,8 +299,12 @@ async fn download_file(
     thread_count: Option<usize>,
     save_dir: Option<String>,
     relative_path: Option<String>,
+    download_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let thread_count = thread_count.unwrap_or(999).max(1).min(999);
+    // 上限 64：与前端总连接策略匹配（并发 2 时 128/2 = 64 线程/文件）。
+    // 过多线程（历史默认 999）会开上千条 TCP 连接 + 等量临时文件句柄，
+    // 导致磁盘随机 I/O 饱和与 Defender 全量扫描，Windows 系统卡顿
+    let thread_count = thread_count.unwrap_or(16).max(1).min(64);
 
     // 目标路径：下载目录 + 相对路径（保留分享子目录结构），无相对路径时平铺
     let full_path = resolve_target_path(&save_dir, &relative_path, &filename);
@@ -324,8 +328,10 @@ async fn download_file(
 
     // 捕获当前 epoch——本次下载的"身份证"
     let epoch = DOWNLOAD_EPOCH.load(Ordering::SeqCst);
-    // 唯一下载 ID，供前端区分并聚合多个并发下载
-    let download_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    // 唯一下载 ID，供前端区分并聚合多个并发下载；前端可传入自定义 ID（如文件 fid）以便关联任务记录
+    let download_id = download_id
+        .filter(|s| !s.is_empty() && s.len() <= 64)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()[..8].to_string());
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<serde_json::Value, String>>();
 
@@ -381,12 +387,14 @@ async fn do_download(
 
     if resp.status().as_u16() >= 400 {
         let status = resp.status().as_u16();
-        let err = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "CDN 返回错误 {}: {}",
-            status,
-            &err[..err.len().min(200)]
-        ));
+        let body = resp.text().await.unwrap_or_default();
+        // 只取 <title> 作为错误信息，避免把 CDN 错误页 HTML 原文塞进前端通知（悬浮岛）
+        let title = body
+            .split("<title>")
+            .nth(1)
+            .and_then(|s| s.split("</title>").next())
+            .unwrap_or("");
+        return Err(format!("CDN 返回错误 {} {}", status, title));
     }
 
     let total_size: u64 = resp
@@ -486,7 +494,8 @@ async fn download_multithread(
         let mut last_downloaded: u64 = 0;
         let mut last_time = std::time::Instant::now();
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // 1s 窗口采样：Δ字节/Δt 即 1 秒平均网速，前端每秒变化一次，避免 500ms 瞬时值跳动剧烈
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             if is_cancelled(epoch) {
                 break;
             }
@@ -734,7 +743,8 @@ async fn download_single(
             .map_err(|e| format!("写入失败: {}", e))?;
         downloaded += chunk.len() as u64;
 
-        if last_emit.elapsed() >= std::time::Duration::from_millis(500) {
+        // 1s 窗口采样：1 秒平均网速，与多线程路径一致
+        if last_emit.elapsed() >= std::time::Duration::from_secs(1) {
             let now = std::time::Instant::now();
             let dt = now.duration_since(last_emit).as_secs_f64();
             let speed = if dt > 0.0 {
@@ -789,6 +799,27 @@ async fn download_single(
 // ── 主入口 ───────────────────────────────────────────────
 
 fn main() {
+    // API-only 模式（供 scripts/speed-test.mjs 等测试脚本使用）：
+    // 跳过窗口/WebView，仅启动内嵌 API 服务，避免 WebView 初始化不确定性
+    if std::env::var("API_ONLY").is_ok() {
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        rt.block_on(async {
+            let router = api_server::create_router();
+            let port: u16 = std::env::var("PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3000);
+            let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+                .await
+                .expect("failed to bind API server port");
+            println!("[quark-api] API-only 模式已启动: http://127.0.0.1:{}", port);
+            axum::serve(listener, router)
+                .await
+                .expect("API server error");
+        });
+        return;
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_os::init())

@@ -14,6 +14,38 @@ type ParseProgressReporter = (list: RawFileItem[], depth: number, page: number) 
 
 const isDirectory = (item: RawFileItem) => item.dir || item.file_type === 0 || item.obj_category === 'dir';
 
+// 全局并发上限：整个解析过程共享，防止请求过多触发接口限流
+const PARSE_CONCURRENCY = 6;
+
+// 全局请求信号量：限制同时进行的 HTTP 请求数。
+// 目录递归与分页会嵌套，各自开并发池会导致并发相乘，因此在最底层的请求处统一限流。
+// 槽位只在单次请求期间持有，不会在持有时等待其他槽位，因此无死锁风险。
+let activeRequests = 0;
+const requestQueue: (() => void)[] = [];
+
+const withSlot = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const run = () =>
+        fn().finally(() => {
+            activeRequests -= 1;
+            requestQueue.shift()?.();
+        });
+
+    if (activeRequests < PARSE_CONCURRENCY) {
+        activeRequests += 1;
+        return run();
+    }
+
+    return new Promise<T>((resolve, reject) => {
+        requestQueue.push(() => {
+            activeRequests += 1;
+            run().then(resolve, reject);
+        });
+    });
+};
+
+// 并行执行任务数组，结果按原任务顺序返回（并发由 withSlot 在请求层统一控制）
+const runParallel = <T,>(tasks: (() => Promise<T>)[]): Promise<T[]> => Promise.all(tasks.map((task) => task()));
+
 export const ShareParser: React.FC = () => {
     const [url, setUrl] = useState('');
     const {
@@ -45,30 +77,61 @@ export const ShareParser: React.FC = () => {
         depth: number = 0,
         onPageLoaded?: ParseProgressReporter
     ) => {
-        let all: RawFileItem[] = [];
-        let page = 1;
-        let total = Infinity;
+        // 第 1 页先请求，拿到 _total 才知道总页数
+        const fetchPage = (page: number) =>
+            withSlot(() => quarkApi.getShareDetail(pid, st, fid, page));
 
-        while (all.length < total) {
-            const res = await quarkApi.getShareDetail(pid, st, fid, page);
+        const firstRes = await fetchPage(1);
+        if (firstRes.status !== 200 || !firstRes.data) {
+            throw new Error(firstRes.message || '获取文件列表失败');
+        }
+
+        const firstList = (firstRes.data.list || []) as RawFileItem[];
+        const hasTotal = firstRes.metadata?._total !== undefined;
+        const total = hasTotal ? (firstRes.metadata?._total as number) : Infinity;
+        onPageLoaded?.(firstList, depth, 1);
+
+        // 首页不足一页或已拿完全部，说明没有更多数据
+        if (firstList.length === 0 || firstList.length < 50 || firstList.length >= total) {
+            return firstList;
+        }
+
+        if (hasTotal) {
+            // 剩余页码已知，一次性并行拉取（并发由信号量统一控制），结果按页码顺序拼接
+            const totalPages = Math.ceil(total / 50);
+            const remainingTasks: (() => Promise<RawFileItem[]>)[] = [];
+            for (let page = 2; page <= totalPages; page++) {
+                remainingTasks.push(async () => {
+                    const res = await fetchPage(page);
+                    if (res.status !== 200 || !res.data) {
+                        throw new Error(res.message || '获取文件列表失败');
+                    }
+                    const list = (res.data.list || []) as RawFileItem[];
+                    onPageLoaded?.(list, depth, page);
+                    return list;
+                });
+            }
+
+            const remainingLists = await runParallel(remainingTasks);
+            return [...firstList, ...remainingLists.flat()];
+        }
+
+        // 无总数：回退为顺序翻页，直到某页不满 50 条
+        const rest: RawFileItem[] = [];
+        let page = 2;
+        while (true) {
+            const res = await fetchPage(page);
             if (res.status !== 200 || !res.data) {
                 throw new Error(res.message || '获取文件列表失败');
             }
-
             const list = (res.data.list || []) as RawFileItem[];
-            if (res.metadata?._total !== undefined) {
-                total = res.metadata._total;
-            } else if (list.length === 0) {
-                break;
-            }
-
-            all = [...all, ...list];
+            if (list.length === 0) break;
+            rest.push(...list);
             onPageLoaded?.(list, depth, page);
-
             if (list.length < 50) break;
             page++;
         }
-        return all;
+        return [...firstList, ...rest];
     };
 
     const getFileTreeRecursive = async (
@@ -80,13 +143,12 @@ export const ShareParser: React.FC = () => {
         onPageLoaded?: ParseProgressReporter
     ): Promise<ShareFileNode[]> => {
         const list = await getFileListPaged(pid, st, fid, depth, onPageLoaded);
-        const nodes: ShareFileNode[] = [];
 
-        for (const item of list) {
+        // 先按原顺序构建节点骨架，目录 children 保持为空数组占位
+        const nodes: ShareFileNode[] = list.map((item) => {
             const isDir = isDirectory(item);
             const path = parentPath ? `${parentPath}/${item.file_name}` : item.file_name;
-
-            const node: ShareFileNode = {
+            return {
                 fid: item.fid,
                 file_name: item.file_name,
                 size: item.size || 0,
@@ -98,13 +160,24 @@ export const ShareParser: React.FC = () => {
                 path,
                 children: [],
                 expanded: false,
-            };
+            } as ShareFileNode;
+        });
 
-            if (isDir) {
-                node.children = await getFileTreeRecursive(pid, st, item.fid, depth + 1, path, onPageLoaded);
-            }
-            nodes.push(node);
+        // 收集同级目录的递归任务并行执行（并发由请求层信号量统一控制），
+        // 按索引回填 children，保证文件树顺序与原串行逻辑一致
+        const dirIndexes = list.map((item, index) => ({ item, index })).filter(({ item }) => isDirectory(item));
+
+        if (dirIndexes.length > 0) {
+            const childrenLists = await runParallel(
+                dirIndexes.map(({ item, index }) => () =>
+                    getFileTreeRecursive(pid, st, item.fid, depth + 1, nodes[index].path, onPageLoaded)
+                )
+            );
+            dirIndexes.forEach(({ index }, i) => {
+                nodes[index].children = childrenLists[i];
+            });
         }
+
         return nodes;
     };
 

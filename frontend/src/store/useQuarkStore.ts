@@ -25,6 +25,24 @@ export interface DownloadInfo {
     status: 'downloading' | 'merging' | 'done';
 }
 
+/** 任务生命周期：排队中 → 转存中 → 下载中 → 合并中 → 终态（已完成/已失败/已跳过/已停止） */
+export type DownloadTaskStatus = 'pending' | 'saving' | 'downloading' | 'merging' | 'done' | 'failed' | 'skipped' | 'stopped';
+
+export interface DownloadTask {
+    fid: string;
+    filename: string;
+    relativePath: string | null;
+    size: number;
+    status: DownloadTaskStatus;
+    downloaded: number;
+    /** 下载中阶段由 Rust 事件上报的实际总字节（未知时回退 size） */
+    total?: number;
+    speed: number;
+    error?: string;
+    /** 落盘绝对路径（下载成功时由 Rust 返回），供「打开文件夹」使用 */
+    savedPath?: string;
+}
+
 interface QuarkState {
     cookie: string;
     toast: {
@@ -49,11 +67,17 @@ interface QuarkState {
     };
     selectedFids: Set<string>;
     downloadConcurrency: number;
-    downloadThreads: number;
     downloadDir: string;
     theme: 'light' | 'dark';
     taskStartedAt: number;
+    /** 全局停止请求：两处「停止」按钮共享，流水线据此中断，避免取消后又拉起新任务 */
+    stopRequested: boolean;
     activeDownloads: Map<string, DownloadInfo>;
+    // 迅雷式任务记录（仅本次运行保留）：key = fid，覆盖排队/转存等无 Rust 事件的阶段
+    downloadTasks: Map<string, DownloadTask>;
+    // 任务级字节账本：整体进度 = (finishedBytes + 活跃文件已下字节) / totalBytes
+    taskTotalBytes: number;
+    taskFinishedBytes: number;
 
     setCookie: (cookie: string) => void;
     setCapacity: (used: number, total: number) => void;
@@ -62,10 +86,14 @@ interface QuarkState {
     addLog: (message: string, type?: LogEntry['type']) => void;
     clearLogs: () => void;
     setDownloadConcurrency: (value: number) => void;
-    setDownloadThreads: (value: number) => void;
     setDownloadDir: (dir: string) => void;
     setTheme: (theme: 'light' | 'dark') => void;
     setTaskStartedAt: (ts: number) => void;
+    setStopRequested: (v: boolean) => void;
+    setTaskBytes: (totalBytes: number) => void;
+    addFinishedBytes: (bytes: number) => void;
+    adjustTaskTotalBytes: (delta: number) => void;
+    resetTaskBytes: () => void;
     setLoggingOut: (isLoggingOut: boolean) => void;
     notify: (message: string, type: 'info' | 'success' | 'error' | 'warn', durationMs?: number) => void;
     toggleFileSelection: (fid: string) => void;
@@ -77,6 +105,10 @@ interface QuarkState {
     updateDownload: (id: string, info: Partial<DownloadInfo> & { filename: string }) => void;
     removeDownload: (id: string) => void;
     clearAllDownloads: () => void;
+    initDownloadTasks: (files: ShareFileNode[]) => void;
+    updateDownloadTask: (fid: string, patch: Partial<DownloadTask>) => void;
+    clearDownloadTasks: () => void;
+    markTasksStopped: () => void;
     resetShareInfo: () => void;
     setShareUrl: (url: string) => void;
 }
@@ -111,12 +143,15 @@ export const useQuarkStore = create<QuarkState>((set) => ({
         text: '',
     },
     selectedFids: new Set<string>(),
-    downloadConcurrency: Number(localStorage.getItem('download_concurrency')) || 5,
-    downloadThreads: Math.min(256, Number(localStorage.getItem('download_threads')) || 999),
+    downloadConcurrency: Math.min(8, Math.max(1, Number(localStorage.getItem('download_concurrency')) || 4)),
     downloadDir: localStorage.getItem('download_dir') || '',
     theme: (localStorage.getItem('theme') === 'dark' ? 'dark' : 'light'),
     taskStartedAt: 0,
+    stopRequested: false,
     activeDownloads: new Map<string, DownloadInfo>(),
+    downloadTasks: new Map<string, DownloadTask>(),
+    taskTotalBytes: 0,
+    taskFinishedBytes: 0,
 
     setCookie: (cookie: string) => {
         localStorage.setItem('quark_cookie', cookie);
@@ -156,16 +191,10 @@ export const useQuarkStore = create<QuarkState>((set) => ({
     },
     clearLogs: () => set({ logs: [] }),
     setDownloadConcurrency: (value: number) => {
-        const normalized = Math.max(1, Math.min(20, value));
+        const normalized = Math.max(1, Math.min(8, value));
         localStorage.setItem('download_concurrency', normalized.toString());
 
         set({ downloadConcurrency: normalized });
-    },
-    setDownloadThreads: (value: number) => {
-        const normalized = Math.max(1, Math.min(256, value));
-        localStorage.setItem('download_threads', normalized.toString());
-
-        set({ downloadThreads: normalized });
     },
     setDownloadDir: (dir: string) => {
         localStorage.setItem('download_dir', dir);
@@ -178,6 +207,15 @@ export const useQuarkStore = create<QuarkState>((set) => ({
         set({ theme });
     },
     setTaskStartedAt: (ts: number) => set({ taskStartedAt: ts }),
+    setStopRequested: (v: boolean) => set({ stopRequested: v }),
+    setTaskBytes: (totalBytes: number) => set({ taskTotalBytes: totalBytes, taskFinishedBytes: 0 }),
+    addFinishedBytes: (bytes: number) => set((state: QuarkState) => ({
+        taskFinishedBytes: state.taskFinishedBytes + bytes,
+    })),
+    adjustTaskTotalBytes: (delta: number) => set((state: QuarkState) => ({
+        taskTotalBytes: Math.max(0, state.taskTotalBytes + delta),
+    })),
+    resetTaskBytes: () => set({ taskTotalBytes: 0, taskFinishedBytes: 0 }),
     notify: (message: string, type: 'info' | 'success' | 'error' | 'warn', durationMs?: number) => {
         const toastId = Date.now() + Math.random();
         const timeout = durationMs ?? 3000;
@@ -239,6 +277,33 @@ export const useQuarkStore = create<QuarkState>((set) => ({
         return { activeDownloads: next };
     }),
     clearAllDownloads: () => set({ activeDownloads: new Map<string, DownloadInfo>() }),
+    initDownloadTasks: (files: ShareFileNode[]) => set(() => ({
+        downloadTasks: new Map(files.map((f) => [f.fid, {
+            fid: f.fid,
+            filename: f.file_name,
+            relativePath: f.path || null,
+            size: f.size || 0,
+            status: 'pending' as DownloadTaskStatus,
+            downloaded: 0,
+            speed: 0,
+        }])),
+    })),
+    updateDownloadTask: (fid: string, patch: Partial<DownloadTask>) => set((state: QuarkState) => {
+        if (!state.downloadTasks.has(fid)) return {};
+        const next = new Map(state.downloadTasks);
+        next.set(fid, { ...next.get(fid)!, ...patch });
+        return { downloadTasks: next };
+    }),
+    clearDownloadTasks: () => set({ downloadTasks: new Map<string, DownloadTask>() }),
+    markTasksStopped: () => set((state: QuarkState) => {
+        const next = new Map(state.downloadTasks);
+        for (const [fid, task] of next) {
+            if (['pending', 'saving', 'downloading', 'merging'].includes(task.status)) {
+                next.set(fid, { ...task, status: 'stopped', speed: 0 });
+            }
+        }
+        return { downloadTasks: next };
+    }),
     resetShareInfo: () => set((state: QuarkState) => ({
         shareInfo: {
             pwdId: '',

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { motion } from 'framer-motion';
 import {
     Zap,
@@ -8,6 +8,7 @@ import {
     User,
     HardDrive,
     RefreshCw,
+    Download,
     ChevronRight
 } from 'lucide-react';
 import { cn } from '../utils';
@@ -30,10 +31,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
     activeTab,
     setActiveTab
 }) => {
-    const { isLoggedIn, toast, downloadThreads, downloadConcurrency, setDownloadThreads, setDownloadConcurrency } = useQuarkStore();
+    const { isLoggedIn, toast, downloadTasks } = useQuarkStore();
+
+    // 剩余未下载任务数 = 总数 − 已完成 − 已存在（跳过）；已失败/已停止均未下载成功，计入
+    // 停止后显示未下载数量，每完成一个递减，新任务启动时随 initDownloadTasks 重建
+    const pendingTaskCount = useMemo(() => {
+        let n = 0;
+        for (const t of downloadTasks.values()) {
+            if (t.status !== 'done' && t.status !== 'skipped') n += 1;
+        }
+        return n;
+    }, [downloadTasks]);
 
     const menuItems = [
         { id: 'parser', icon: Zap, label: '解析提取' },
+        { id: 'downloads', icon: Download, label: '下载管理' },
         { id: 'history', icon: RefreshCw, label: '解析历史' },
         { id: 'settings', icon: Settings, label: '软件设置' },
         { id: 'help', icon: HelpCircle, label: '使用说明' },
@@ -69,7 +81,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     >
                         <item.icon size={20} strokeWidth={activeTab === item.id ? 2.5 : 2} />
                         <span className="font-semibold text-sm">{item.label}</span>
-                        {activeTab === item.id && (
+                        {item.id === 'downloads' && pendingTaskCount > 0 ? (
+                            // 有未完成任务时角标替代箭头，呼吸动画提示（不复用 active-pill 的 layoutId，避免跨菜单项飞行动画）
+                            <motion.span
+                                initial={{ scale: 0 }}
+                                animate={{ scale: [1, 1.15, 1] }}
+                                transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut' }}
+                                className={cn(
+                                    "absolute right-2.5 min-w-5 h-5 px-1.5 rounded-full flex items-center justify-center text-[10px] font-black tabular-nums shadow-sm",
+                                    activeTab === item.id
+                                        ? "bg-white text-indigo-600"
+                                        : "bg-indigo-500 text-white shadow-indigo-300/50 dark:shadow-indigo-900/40"
+                                )}
+                            >
+                                {pendingTaskCount > 99 ? '99+' : pendingTaskCount}
+                            </motion.span>
+                        ) : activeTab === item.id && (
                             <motion.div
                                 layoutId="active-pill"
                                 className="absolute right-3"
@@ -82,44 +109,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </nav>
 
             <div className="mt-auto space-y-4">
-                {/* 转移过来的并发设置 */}
-                {activeTab === 'parser' && (
-                    <div className="space-y-2">
-                        <div className="p-4 bg-white/10 dark:bg-slate-800/50 rounded-2xl border border-white/10 dark:border-slate-700/60">
-                            <div className="flex items-center justify-between mb-2">
-                                <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase">下载线程</span>
-                                <input
-                                    type="number"
-                                    min="1" max="256"
-                                    value={downloadThreads}
-                                    onChange={(e) => setDownloadThreads(Number(e.target.value))}
-                                    className="w-14 text-right text-xs font-black text-indigo-500 bg-transparent outline-none border-b border-indigo-200 focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                />
-                            </div>
-                            <input
-                                type="range"
-                                min="1" max="256"
-                                value={downloadThreads}
-                                onChange={(e) => setDownloadThreads(Number(e.target.value))}
-                                className="w-full h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                            />
-                        </div>
-                        <div className="p-4 bg-white/10 dark:bg-slate-800/50 rounded-2xl border border-white/10 dark:border-slate-700/60">
-                            <div className="flex items-center justify-between mb-2">
-                                <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase">同时下载</span>
-                                <span className="text-xs font-black text-indigo-500">{downloadConcurrency}</span>
-                            </div>
-                            <input
-                                type="range"
-                                min="1" max="20"
-                                value={downloadConcurrency}
-                                onChange={(e) => setDownloadConcurrency(Number(e.target.value))}
-                                className="w-full h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                            />
-                        </div>
-                    </div>
-                )}
-
                 {isLoggedIn ? (
                     <div className="space-y-4">
                         <CapacityStats onRefresh={onRefreshCapacity} />
